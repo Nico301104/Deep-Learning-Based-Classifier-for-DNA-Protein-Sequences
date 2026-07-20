@@ -1,141 +1,105 @@
-# DNA Classifier — Promotor vs. Non-Promotor (CNN 1D, PyTorch)
+# DNA Promoter Sequence Classifier
 
-Proiect de bioinformatică / deep learning care clasifică secvențe scurte de
-ADN drept **promotor** sau **non-promotor**, folosind o rețea convoluțională
-1D (PyTorch) și un baseline clasic (regresie logistică pe frecvențe de
-k-mere), pentru comparație.
+A PyTorch implementation of a one-dimensional convolutional neural network for the binary classification of short DNA sequences as **promoter** or **non-promoter** regions, evaluated against a k-mer frequency logistic regression baseline.
 
-Scris pentru a fi **curat, reproductibil și rulabil de la zero, mereu** —
-inclusiv fără conexiune la internet (vezi secțiunea Dataset).
+## 1. Problem Statement
 
-## De ce contează problema
+Promoters are short DNA regions located immediately upstream of a gene's transcription start site, where RNA polymerase and associated transcription factors assemble to initiate transcription. In *Escherichia coli*, canonical sigma-70 promoters are characterized by two conserved hexameric motifs:
 
-Promotorii sunt regiuni scurte de ADN, situate imediat înainte de o genă,
-unde se leagă ARN-polimeraza pentru a iniția transcrierea. La *E. coli*,
-promotorii puternici conțin de regulă două motive conservate:
+- the **-35 element** (consensus `TTGACA`), positioned approximately 35 base pairs upstream of the transcription start site;
+- the **-10 element**, or Pribnow box (consensus `TATAAT`), positioned approximately 10 base pairs upstream.
 
-- **cutia -35** (`TTGACA`), cu ~35 de baze înainte de situsul de start;
-- **cutia -10 / Pribnow box** (`TATAAT`), cu ~10 baze înainte de situsul de start.
+Automated promoter recognition from raw nucleotide sequence is a well-established benchmark problem in computational genomics. It provides a controlled setting to evaluate whether a convolutional architecture can learn positional and compositional motif patterns directly from one-hot encoded sequence data, as opposed to a linear classifier operating on order-agnostic k-mer frequency statistics.
 
-Recunoașterea automată a acestor regiuni dintr-o secvență brută e un
-exercițiu clasic de clasificare a secvențelor biologice și un bun test
-pentru cât de bine învață un CNN 1D reprezentări utile direct din
-one-hot encoding, comparativ cu o abordare "sac de k-mere" + model liniar.
+## 2. Dataset
 
-## Rezultate obținute
+The pipeline first attempts to retrieve the [UCI Machine Learning Repository "Molecular Biology (Promoter Gene Sequences)"](https://archive.ics.uci.edu/dataset/67/molecular+biology+promoter+gene+sequences) dataset: 106 expert-annotated *E. coli* sequences of 57 nucleotides each (53 promoter, 53 non-promoter).
 
-Rulare de referință, cu seed fix (42), pe **datasetul real UCI** (106
-secvențe E. coli, 53 promotor / 53 non-promotor), split 70/15/15
-stratificat (test set: 16 secvențe):
+If the download fails for any reason (absence of network connectivity, endpoint unavailability, or mirror downtime), the pipeline deterministically generates a synthetic dataset of equivalent structure, guaranteeing that the pipeline executes successfully under all conditions, including fully offline environments. The synthetic generator produces:
 
-| Model                              | Accuracy | Precision | Recall | F1     | AUC-ROC |
-|-------------------------------------|:--------:|:---------:|:------:|:------:|:-------:|
-| **CNN 1D**                          | 0.875    | 0.875     | 0.875  | 0.875  | 0.969   |
-| Baseline (regresie logistică, k-mer)| 0.813    | 0.778     | 0.875  | 0.824  | 0.828   |
+- background sequences drawn uniformly at random from the alphabet `{A, C, G, T}`;
+- positive-class sequences with the `-35` and `-10` consensus motifs injected at biologically plausible relative offsets, subject to positional jitter and a 12% per-base mutation rate, in order to approximate the variability observed in real regulatory elements rather than inserting identical, noiseless motifs;
+- negative-class sequences drawn entirely at random, with no motif injection;
+- 4,000 sequences in total, balanced 50/50 between classes.
 
-**CNN 1D câștigă pe toate metricile.** Motivul cel mai probabil: CNN-ul
-învață filtre convoluționale care detectează motive de secvență
-*poziționale și combinate* (ex. prezența simultană a cutiei -35 și a
-cutiei -10 la distanța relativă corectă), în timp ce baseline-ul reduce
-fiecare secvență la un vector de frecvențe de k-mere care ignoră complet
-poziția și ordinea — un k-mer rar dar foarte informativ (ex. fragmente
-din `TATAAT`) e "diluat" în același vector ca restul secvenței.
+The data source actually used in a given run is recorded programmatically in `data/dataset_source.txt` (`uci_real` or `synthetic`), and the resulting dataset is persisted to `data/dataset.csv`. All experiments reported below were conducted on the real UCI dataset.
 
-Pe setul de date **sintetic** (4000 secvențe generate local, folosit ca
-fallback — vezi mai jos), diferența se păstrează la scară mai mare și cu
-încredere statistică mai mare (test set de 600 secvențe):
+Sequences are split into training, validation, and test partitions (70% / 15% / 15%) using stratified sampling with a fixed random seed, preserving class balance across all three partitions.
 
-| Model                              | Accuracy | Precision | Recall | F1     | AUC-ROC |
-|-------------------------------------|:--------:|:---------:|:------:|:------:|:-------:|
-| **CNN 1D**                          | ~0.95    | ~0.96     | ~0.94  | ~0.95  | ~0.99   |
-| Baseline (regresie logistică, k-mer)| ~0.87    | ~0.89     | ~0.85  | ~0.87  | ~0.94   |
+## 3. Methodology
 
-> Notă onestă: datasetul real UCI are doar 106 secvențe în total (16 în
-> test set), deci metricile de pe el au varianță mare — o singură
-> secvență greșit clasificată schimbă accuracy-ul cu ~6%. Rulările pe
-> datasetul sintetic (mult mai mare) confirmă însă același clasament și
-> aceeași distanță relativă între cele două modele, deci concluzia
-> ("CNN > baseline liniar pe k-mere") e robustă, nu un artefact al unui
-> set de date mic.
+### 3.1 Sequence Representation
 
-Numerele exacte obținute la ultima rulare sunt salvate în
-[`results/metrics.json`](results/metrics.json) și
-[`results/metrics_summary.txt`](results/metrics_summary.txt).
+Two encoding schemes are used, one per model:
 
-## Dataset
+- **One-hot encoding** (CNN input): each sequence is mapped to a `(4, L)` tensor over the channel ordering A, C, G, T, zero-padded or truncated to a fixed length `L = 100`.
+- **k-mer frequency encoding** (baseline input): each sequence is mapped to a length-normalized frequency vector over all `4^k` possible k-mers (`k = 4`), discarding positional information.
 
-Pipeline-ul **încearcă întâi** să descarce dataset-ul public
-[UCI Machine Learning Repository — "Molecular Biology (Promoter Gene
-Sequences)"](https://archive.ics.uci.edu/dataset/67/molecular+biology+promoter+gene+sequences):
-106 secvențe de *E. coli* de 57 nucleotide, etichetate manual de experți
-(53 promotor / 53 non-promotor).
-
-**Dacă descărcarea eșuează** (fără internet, URL indisponibil, mirror
-căzut etc.), pipeline-ul **generează automat un dataset sintetic
-realist**, astfel încât proiectul rulează mereu, inclusiv complet offline:
-
-- secvențe ADN aleatoare din alfabetul `{A, C, G, T}`, lungime fixă (81 nt);
-- clasa **promotor**: fond aleator în care sunt injectate cutia `-35`
-  (`TTGACA`) și cutia `-10` (`TATAAT`), la poziții aproximativ corecte
-  una față de cealaltă, cu jitter de poziție și mutații punctiforme
-  aleatoare (12% rată de mutație per literă a motivului) — ca să simuleze
-  variabilitatea biologică reală, nu motive perfecte identice;
-- clasa **non-promotor**: secvențe complet aleatoare, fără motivele
-  injectate;
-- 4000 de secvențe, echilibrate 50/50, generate determinist (seed fix).
-
-**Care variantă a fost folosită efectiv** la ultima rulare e documentat
-automat în [`data/dataset_source.txt`](data/dataset_source.txt)
-(`uci_real` sau `synthetic`), iar datele propriu-zise sunt salvate în
-`data/dataset.csv`.
-
-## Arhitectură
-
-**CNN 1D** (`src/model.py`):
+### 3.2 CNN Architecture
 
 ```
-Input (batch, 4, L)                     -- one-hot A/C/G/T, padded/truncat la L=100
-  -> Conv1d(4->32,  k=7) -> BatchNorm -> ReLU -> MaxPool(2)
-  -> Conv1d(32->64, k=5) -> BatchNorm -> ReLU -> MaxPool(2)
-  -> Conv1d(64->128,k=3) -> BatchNorm -> ReLU -> MaxPool(2)
-  -> AdaptiveAvgPool1d(1)               -- global average pooling
-  -> Flatten -> Linear(128->64) -> ReLU -> Dropout(0.3) -> Linear(64->1)
-Output: 1 logit -> BCEWithLogitsLoss (clasificare binară)
+Input                                    (batch, 4, L)
+  Conv1d(4  → 32,  kernel=7) → BatchNorm1d → ReLU → MaxPool1d(2)
+  Conv1d(32 → 64,  kernel=5) → BatchNorm1d → ReLU → MaxPool1d(2)
+  Conv1d(64 → 128, kernel=3) → BatchNorm1d → ReLU → MaxPool1d(2)
+  AdaptiveAvgPool1d(1)
+  Flatten → Linear(128 → 64) → ReLU → Dropout(p=0.3) → Linear(64 → 1)
+Output                                    single logit (BCEWithLogitsLoss)
 ```
 
-**Baseline** (`src/baseline.py`): fiecare secvență e transformată într-un
-vector de frecvențe normalizate ale tuturor k-merelor posibile (k=4, deci
-4⁴ = 256 caracteristici), urmat de o regresie logistică (`scikit-learn`).
+The network is trained with the Adam optimizer (learning rate `1e-3`, weight decay `1e-4`) and binary cross-entropy loss. Training terminates via early stopping on validation loss (patience of 10 epochs), and the parameter set achieving the lowest validation loss is persisted to `results/best_model.pt`.
 
-Antrenare CNN: Adam (`lr=1e-3`, `weight_decay=1e-4`), `BCEWithLogitsLoss`,
-early stopping pe validation loss (`patience=10`), salvarea automată a
-celui mai bun model (`results/best_model.pt`).
+### 3.3 Baseline Model
 
-Toți hiperparametrii sunt centralizați în **`src/config.py`** — niciun
-"magic number" nu e împrăștiat prin restul codului.
+A logistic regression classifier (scikit-learn) fit on the 4-mer frequency representation described in Section 3.1. This baseline isolates the contribution of the convolutional architecture: it uses the same underlying sequence composition information but is structurally incapable of representing motif position or motif co-occurrence at a specific spacing.
 
-## Structura proiectului
+### 3.4 Reproducibility
+
+All sources of stochasticity — the Python `random` module, NumPy, PyTorch, and the scikit-learn train/validation/test split — are seeded with a fixed value (`RANDOM_SEED = 42`, defined once in `src/config.py`). PyTorch is additionally configured for deterministic execution (`torch.use_deterministic_algorithms`, `cudnn.deterministic = True`, `cudnn.benchmark = False`). All hyperparameters are declared exclusively in `src/config.py`; no configuration values are hardcoded elsewhere in the codebase.
+
+## 4. Results
+
+Evaluation on the held-out test partition of the real UCI dataset (16 sequences):
+
+| Model | Accuracy | Precision | Recall | F1-score | ROC-AUC |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **CNN (1D)** | **0.875** | **0.875** | 0.875 | **0.875** | **0.969** |
+| Logistic Regression (4-mer) | 0.813 | 0.778 | 0.875 | 0.824 | 0.828 |
+
+The CNN outperforms the k-mer baseline on every metric except recall, where both models are tied. On the synthetic dataset (600-sequence test partition, providing substantially higher statistical power), the same ranking holds with a wider margin:
+
+| Model | Accuracy | Precision | Recall | F1-score | ROC-AUC |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **CNN (1D)** | **≈0.95** | **≈0.96** | **≈0.94** | **≈0.95** | **≈0.99** |
+| Logistic Regression (4-mer) | ≈0.87 | ≈0.89 | ≈0.85 | ≈0.87 | ≈0.94 |
+
+**Interpretation.** The performance gap is attributable to the representational capacity of each model with respect to motif structure. The CNN's convolutional filters can learn to detect the joint presence of both the -35 and -10 elements at their characteristic relative spacing, effectively encoding a positional and compositional signal. The k-mer logistic regression, by construction, reduces each sequence to an order-invariant bag-of-k-mers representation: a rare but highly discriminative k-mer fragment (e.g., a subsequence of `TATAAT`) contributes an identical signal regardless of where in the sequence it occurs or what co-occurs alongside it, which limits the ceiling of a linear classifier operating on this representation.
+
+The full numerical results of the reference run, together with confusion matrices, are stored in [`results/metrics.json`](results/metrics.json) and [`results/metrics_summary.txt`](results/metrics_summary.txt).
+
+**Methodological caveat.** The real UCI dataset comprises only 106 sequences in total, yielding a 16-sequence test partition; at this sample size, a single misclassification shifts accuracy by approximately six percentage points, and reported metrics should be interpreted with corresponding caution. The synthetic dataset, generated at a substantially larger scale, is included specifically to corroborate that the observed ranking between models is not an artifact of small-sample variance.
+
+## 5. Repository Structure
 
 ```
 dna-classifier/
-  data/                  dataset descărcat sau generat (creat la rulare)
-  src/
-    config.py            toți hiperparametrii, căile, seed-ul
-    data.py              descărcare/generare dataset + preprocesare + split
-    model.py             CNN 1D
-    baseline.py           k-mer counts + regresie logistică
-    train.py              buclă de antrenare + early stopping
-    evaluate.py            metrici + grafice
-  results/                grafice + metrici salvate (create la rulare)
-  tests/                  teste unitare (pytest)
-  main.py                 rulează tot pipeline-ul cu o singură comandă
-  requirements.txt
-  README.md
+├── data/                   generated or downloaded dataset (created at runtime)
+├── src/
+│   ├── config.py           centralized hyperparameters, paths, and random seed
+│   ├── data.py              dataset acquisition, preprocessing, stratified split
+│   ├── model.py              1D CNN architecture
+│   ├── baseline.py            k-mer frequency + logistic regression baseline
+│   ├── train.py                training loop with early stopping
+│   └── evaluate.py              metrics computation and plot generation
+├── results/                generated metrics, plots, and model checkpoint
+├── tests/                   unit test suite (pytest)
+├── main.py                  single-entry-point pipeline execution
+└── requirements.txt
 ```
 
-## Instalare
+## 6. Installation
 
-Necesită Python 3.11+ (testat cu 3.12). Recomandat: mediu virtual.
+Requires Python 3.11 or later. Use of a virtual environment is strongly recommended.
 
 ```bash
 python -m venv .venv
@@ -145,78 +109,44 @@ python -m venv .venv
 # Linux / macOS
 source .venv/bin/activate
 
-# 1) PyTorch CPU-only (wheel dedicat, mult mai mic decât cel cu CUDA)
+# CPU-only PyTorch build (no CUDA dependency)
 pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
 
-# 2) restul dependențelor
+# Remaining dependencies
 pip install -r requirements.txt
 ```
 
-Nu este necesar GPU/CUDA — întregul proiect rulează pe CPU.
+The entire pipeline runs on CPU; no GPU or CUDA toolkit is required.
 
-## Rulare
+## 7. Usage
 
-Pipeline-ul complet (descărcare/generare date -> split -> antrenare CNN ->
-antrenare baseline -> evaluare -> grafice) rulează cu o singură comandă:
+Executing the complete pipeline — data acquisition, preprocessing, model training, baseline training, evaluation, and plot generation — requires a single command:
 
 ```bash
 python main.py
 ```
 
-Opțional, hiperparametrii pot fi suprascriși din linia de comandă:
+Key hyperparameters may be overridden via command-line arguments:
 
 ```bash
 python main.py --epochs 50 --batch-size 16 --lr 5e-4
 ```
 
-La final, în consolă apare un rezumat comparativ al metricilor pe test
-set și concluzia despre care model performează mai bine.
+Upon completion, a comparative summary of test-set metrics and the resulting model ranking are printed to standard output and written to `results/metrics_summary.txt`.
 
-### Teste
+### Test Suite
 
 ```bash
 pytest -q
 ```
 
-Acoperă: dimensiunile encoding-ului one-hot, corectitudinea lui pentru
-secvențe scurte/lungi/padding, encoding-ul k-mer, echilibrul claselor în
-datasetul sintetic generat, determinismul generării (seed fix), split-ul
-stratificat train/val/test, și forward pass-ul CNN-ului pe batch-uri
-dummy de dimensiuni variate (verificarea shape-ului de ieșire).
+The suite covers: correctness and output dimensionality of one-hot encoding across variable-length and padded inputs; correctness of k-mer frequency encoding; class balance and determinism (under a fixed seed) of the synthetic data generator; correctness and stratification of the train/validation/test split; and the forward pass of the CNN across variable batch and sequence lengths.
 
-## Rezultate și grafice generate
+## 8. Reproducibility Statement
 
-După rulare, în `results/` apar:
+Given the fixed random seed and deterministic PyTorch configuration described in Section 3.4, re-executing `python main.py` on the same machine and dependency versions reproduces the reported results exactly. Every hyperparameter governing data generation, preprocessing, model architecture, and optimization is defined in a single location, `src/config.py`, with no implicit or scattered configuration values elsewhere in the codebase.
 
-- `best_model.pt` — ponderile celui mai bun model CNN (după val loss);
-- `loss_curve.png` — evoluția train/validation loss pe epoci, cu epoca
-  aleasă de early stopping marcată;
-- `roc_curve.png` — curba ROC a CNN-ului pe test set (cu AUC);
-- `confusion_matrix.png` / `baseline_confusion_matrix.png` — matricile de
-  confuzie ale celor două modele pe test set;
-- `metrics.json` / `metrics_summary.txt` — toate metricile numerice,
-  în format structurat și, respectiv, lizibil.
+## 9. Limitations
 
-## Reproductibilitate
-
-- Toate sursele de aleatorism (`random`, `numpy`, `torch`, split-ul
-  scikit-learn) sunt fixate pe același seed (`42`, în `src/config.py`).
-- PyTorch e forțat în mod determinist
-  (`torch.use_deterministic_algorithms`, `cudnn.deterministic=True`).
-- Toți hiperparametrii (arhitectură, optimizator, batch size, early
-  stopping etc.) sunt definiți într-un singur loc: `src/config.py`.
-- Proiectul e CPU-only by design — nu depinde de disponibilitatea unui
-  GPU pentru a reproduce exact rezultatele.
-
-## Limitări cunoscute
-
-- Datasetul real UCI e foarte mic (106 secvențe) — suficient pentru un
-  proof-of-concept, dar test set-ul de 16 secvențe are varianță mare.
-  Datasetul sintetic (mult mai mare) e inclus tocmai pentru a valida
-  concluziile la scară mai mare și a garanta că pipeline-ul rulează
-  mereu, inclusiv offline.
-- Motivele -10/-35 folosite la generarea sintetică sunt o simplificare a
-  biologiei reale a promotorilor (care implică și alți factori — tăria
-  promotorului, spacer-ul dintre cutii, factori sigma etc.); scopul lor
-  e să ofere un semnal învățabil realist, nu o simulare biologică
-  completă.
+- The real UCI dataset is small (106 sequences); the resulting test-set metrics carry non-trivial variance, as discussed in Section 4. The synthetic dataset is provided as a scale-corroborated complement, not a substitute.
+- The synthetic motif-injection model is a deliberate simplification of promoter biology. It does not model promoter strength, spacer-length constraints between the -35 and -10 elements, sigma-factor specificity, or the broader regulatory context (e.g., transcription factor binding sites, DNA supercoiling). Its purpose is to provide a learnable, structurally realistic signal for pipeline validation, not a biophysical simulation.
