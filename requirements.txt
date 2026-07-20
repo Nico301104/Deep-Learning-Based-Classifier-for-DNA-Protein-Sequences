@@ -1,0 +1,19 @@
+# Pentru instalarea build-ului CPU-only al PyTorch (recomandat, mult mai mic
+# decat build-ul cu CUDA), instaleaza mai intai separat:
+#
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+#
+# apoi restul dependentelor din acest fisier:
+#
+#   pip install -r requirements.txt
+#
+# (vezi README.md, sectiunea "Instalare", pentru pasii completi)
+
+torch==2.13.0
+numpy==2.5.1
+pandas==3.0.3
+scikit-learn==1.9.0
+matplotlib==3.11.1
+scipy==1.18.0
+joblib==1.5.3
+pytest==9.1.1
